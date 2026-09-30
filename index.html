@@ -17,6 +17,7 @@
 .preview-modes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;gap:3px}.preview-option{position:relative;min-width:0}.preview-option input{position:absolute;opacity:0;width:1px;height:1px}.preview-option label{display:grid;place-items:center;min-height:42px;height:100%;padding:9px 8px;border-radius:6px;font-size:.875rem;font-weight:600;text-align:center;cursor:pointer;line-height:1.4}.preview-option input:checked+label{background:#fff;box-shadow:0 1px 3px #1c382418}.preview-option input:focus-visible+label{outline:3px solid #c78d14;outline-offset:1px}.copy-main{min-height:72px;padding:22px 16px;font-size:1rem;font-weight:700}.download-actions{display:grid;gap:8px;border-top:1px solid var(--line);margin-top:20px;padding-top:16px}.download-actions button{width:100%;font-weight:500;background:#fff}.download-actions button:hover{background:#edf2eb}
 .copy-main.is-copied{background:#28754e;border-color:#28754e}.copy-toast{position:fixed;left:50%;top:max(24px,env(safe-area-inset-top));transform:translate(-50%,12px);z-index:1000;display:flex;align-items:center;gap:12px;width:max-content;max-width:calc(100vw - 32px);padding:17px 22px;border:1px solid #ffffff35;border-radius:12px;background:#205b4a;color:#fff;box-shadow:0 8px 32px #102a3540;font-size:1rem;font-weight:600;line-height:1.5;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .16s ease,transform .16s ease,visibility .16s}.copy-toast.is-visible{opacity:1;visibility:visible;transform:translate(-50%,0)}.toast-icon{display:grid;place-items:center;flex-shrink:0;width:30px;height:30px;border-radius:50%;background:#ffffff24;font-size:1.2rem}@media(prefers-reduced-motion:reduce){.copy-toast{transition:none}}
 .sampling-modes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));width:100%;gap:3px}
+.game-export{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:24px;padding:18px 20px;background:#edf6ee;border:1px solid #a9c8ae;border-radius:12px}.game-export strong{display:block;margin-bottom:4px}.game-export p{font-size:.875rem;color:#42634c}.game-export-download{flex-shrink:0;display:block;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);padding:10px 14px;font-size:.875rem;font-weight:600;text-align:center;text-decoration:none}.game-export-download:hover{background:#edf2eb}.game-export-download[aria-disabled=true]{opacity:.42;cursor:wait}.game-export.error{background:#fff2ef;border-color:#e2b7ad}.game-export.error p{color:#963f31}@media(max-width:680px){.game-export{align-items:stretch;flex-direction:column;gap:12px;padding:16px}.game-export-download{width:100%}}
 </style>
 </head>
 <body>
@@ -24,6 +25,7 @@
 <noscript>Please enable JavaScript to use this tool. / 请启用 JavaScript 以使用此工具。</noscript>
 <main>
 <div class="intro"><div><h1 data-i18n="headline">Turn a favorite image into bead art.</h1><p data-i18n="intro">Upload an image and adjust the crop to create a pattern for the Pixel Beads VRChat world.</p></div><div class="spec" data-i18n="spec">32 × 32 / 16 colors + empty</div></div>
+<section class="game-export" id="gameExportNotice" hidden aria-labelledby="gameExportTitle"><div><strong id="gameExportTitle" data-i18n="gameExportTitle">Artwork from the game</strong><p id="gameExportMessage" role="status" aria-live="polite"></p></div><a class="game-export-download" id="gameExportDownload" href="#" data-i18n="gameExportDownload" hidden>Download artwork PNG</a></section>
 <div class="workspace" id="workspace">
 <section class="panel" aria-labelledby="cropTitle"><div class="panel-head"><h2 id="cropTitle"><span class="step">01</span><span data-i18n="cropTitle">Image &amp; crop</span></h2><button id="demoButton" type="button" data-i18n="demo">Use example</button></div><div class="panel-body">
 <input class="file-input" type="file" id="fileInput" accept="image/*" tabindex="-1" data-i18n-aria-label="chooseFile" aria-label="Choose an image file">
@@ -98,7 +100,40 @@ const BeadCore = (() => {
     if(cells.length!==1024 || Array.from(cells).some(v=>!Number.isInteger(v)||v<0||v>16)) throw new Error('图案必须包含 1,024 个 0–16 的整数');
   }
   function template(cells) {validate(cells);return Array.from(cells,v=>symbols[v]).join('');}
-  return {symbols,hex,rgb,quantize,nearest,template};
+  function decodeTemplate(pattern) {
+    if(typeof pattern!=='string' || pattern.length!==1024 || !/^[0-9A-G]{1024}$/.test(pattern)) throw new Error('Invalid 32 × 32 template');
+    return Uint8Array.from(pattern,symbol=>symbols.indexOf(symbol));
+  }
+  return {symbols,hex,rgb,quantize,nearest,template,decodeTemplate};
+})();
+</script>
+<script id="bead-export">
+// Game export URL v1: #export=1&pattern=<1024 top-down symbols>&style=holes|solid&name=<encoded name>
+const BeadExport = (() => {
+  function parseUrl(value) {
+    const fragment=new URL(value).hash.slice(1),params=new URLSearchParams(fragment);
+    if(!params.has('export') && !params.has('pattern'))return null;
+    if(fragment.length>8192)throw new Error('Export URL is too long');
+    for(const key of ['export','pattern','style','name'])if(params.getAll(key).length>1)throw new Error('Duplicate export parameter');
+    if(params.get('export')!=='1')throw new Error('Unsupported export version');
+    const cells=BeadCore.decodeTemplate(params.get('pattern')),style=params.get('style') ?? 'solid',name=(params.get('name') ?? '').trim();
+    if(!['holes','solid'].includes(style))throw new Error('Invalid artwork style');
+    if(name.length>128)throw new Error('Artwork name is too long');
+    return {cells,style,name};
+  }
+  function drawArtwork(g,cells,style='solid',size=1024) {
+    BeadCore.template(cells);
+    if(!['holes','solid'].includes(style) || !Number.isInteger(size) || size<32 || size>4096)throw new Error('Invalid artwork output');
+    const cell=size/32;g.clearRect(0,0,size,size);
+    for(let i=0;i<1024;i++) {
+      const v=cells[i];if(!v)continue;
+      const x=i%32*cell,y=Math.floor(i/32)*cell;g.fillStyle='#'+BeadCore.hex[v-1];
+      if(style==='holes') {
+        g.beginPath();g.arc(x+cell/2,y+cell/2,cell*.455,0,Math.PI*2);g.arc(x+cell/2,y+cell/2,cell*.145,0,Math.PI*2,true);g.fill('evenodd');
+      }else g.fillRect(x,y,cell,cell);
+    }
+  }
+  return {parseUrl,drawArtwork};
 })();
 </script>
 <script id="bead-i18n">
@@ -114,6 +149,7 @@ const BeadI18n = (() => {
       downloadChart:'Download pattern', downloadPixels:'32px PNG', downloadHint:'The pattern includes coordinates, color codes and counts. The 32px PNG preserves transparent cells.', emptyNote:'The pattern is empty. Adjust the crop or lower the alpha threshold.',
       exportTitle:'Template string', templateLabel:'Template · 0–G', codeInfo:'1,024 characters · 0 = empty · 1–G = colors · top row first', copy:'Copy template', downloadCode:'Download TXT', footer:'Made for the Pixel Beads VRChat world · Original 16-color palette',
       loading:'Reading image…', loaded:'Image loaded. Drag or zoom to adjust. Animated images use a single frame.', loadError:'This image could not be read. Try a supported PNG, JPG, WebP or SVG file.', copied:'Template copied.', copyDone:'✓ Copied', copyNotice:'Template copied to clipboard.', copyFallback:'Template selected. Press Ctrl+C (Mac: ⌘C) to copy.', pngReady:'PNG download prepared.', pngError:'Image export failed. Please try again.', txtReady:'Template TXT download prepared.',
+      gameExportTitle:'Artwork from the game', gameExportName:'Bead artwork', gameExportFile:'Game artwork · {name} · 32 × 32', gameExportPreparing:'Artwork restored. Preparing your PNG download…', gameExportReady:'Your 1024 × 1024 PNG download has been started. If it does not appear, use the download button.', gameExportDownload:'Download artwork PNG', gameExportInvalid:'This artwork link is incomplete or unsupported. Copy the full export URL from the game and try again.', gameExportError:'The artwork was restored, but PNG export failed. Use the download button to try again.',
       colorNames:['Cream','Ink','Coral','Pink','Apricot','Yellow','Mint','Forest','Sky','Blue','Lilac','Violet','Brown','Caramel','Ivory','Berry'], beadQuantity:'{count} beads', chartTitle:'PIXEL BEADS / BEAD PATTERN', chartSubtitle:'32 × 32  ·  {count} beads  ·  Leave empty cells blank', chartFooter:'Pixel Beads · 16 colors · Codes 1–9 / A–G · Coordinates start at the top left', chartSuffix:'_pattern.png'
     },
     zh: {
@@ -126,6 +162,7 @@ const BeadI18n = (() => {
       downloadChart:'下载编号图纸', downloadPixels:'下载 32px PNG', downloadHint:'图纸含坐标、色号和用量表；32px PNG 保留空格透明度。', emptyNote:'当前图案全为空格。请调整构图或降低透明度阈值。',
       exportTitle:'模板字符串', templateLabel:'模板字符串 · 0–G', codeInfo:'1,024 字符 · 0 为空格 · 1–G 为色号 · 顶行优先', copy:'复制模板字符串', downloadCode:'下载模板 TXT', footer:'适配 Pixel Beads VRChat 场景 · 固定 16 色色板',
       loading:'正在读取图片…', loaded:'图片已载入，可拖动、缩放调整。动图仅取静态帧。', loadError:'无法读取这张图片。请使用浏览器支持的 PNG、JPG、WebP 或 SVG 等格式。', copied:'模板字符串已复制。', copyDone:'✓ 已复制', copyNotice:'模板字符串已复制到剪贴板', copyFallback:'模板字符串已全选，请按 Ctrl+C（Mac：⌘C）复制。', pngReady:'已生成 PNG 下载。', pngError:'导出图片失败，请重试。', txtReady:'已生成模板 TXT 下载。',
+      gameExportTitle:'游戏作品导出', gameExportName:'拼豆作品', gameExportFile:'游戏作品 · {name} · 32 × 32', gameExportPreparing:'作品已还原，正在准备 PNG 下载…', gameExportReady:'已发起 1024 × 1024 PNG 下载。若未看到下载文件，请点击下载按钮。', gameExportDownload:'下载作品 PNG', gameExportInvalid:'作品链接不完整或版本不支持，请从游戏中复制完整的导出 URL 后重试。', gameExportError:'作品已还原，但 PNG 导出失败，请点击下载按钮重试。',
       colorNames:['奶油','墨黑','珊瑚','浅粉','杏橙','暖黄','浅绿','森林','浅蓝','海蓝','浅紫','深紫','棕色','焦糖','米白','莓红'], beadQuantity:'{count} 颗', chartTitle:'PIXEL BEADS / 拼豆图纸', chartSubtitle:'32 × 32  ·  {count} 颗  ·  空格不放豆', chartFooter:'Pixel Beads 场景固定 16 色  ·  色号 1–9 / A–G  ·  坐标自左上角起', chartSuffix:'_编号图纸.png'
     }
   };
@@ -144,7 +181,7 @@ const BeadI18n = (() => {
   const $=id=>document.getElementById(id),C=BeadCore;
   let language=BeadI18n.detect(navigator.languages?.[0] || navigator.language);
   const t=(key,vars)=>BeadI18n.translate(language,key,vars);
-  const state={source:null,oriented:null,angle:0,mirror:false,zoom:100,x:0,y:0,view:'chart',cells:new Uint8Array(1024),counts:new Uint16Array(17),name:'',isDemo:true,statusKey:'',statusError:false,ticket:0};
+  const state={source:null,oriented:null,angle:0,mirror:false,zoom:100,x:0,y:0,view:'chart',cells:new Uint8Array(1024),counts:new Uint16Array(17),name:'',isDemo:true,isGameExport:false,gameExport:null,statusKey:'',statusError:false,ticket:0};
   const crop=$('cropCanvas'),preview=$('previewCanvas'),sample=document.createElement('canvas'); sample.width=sample.height=32;
   const sampleContext=sample.getContext('2d',{willReadFrequently:true});
   let frame=0,copyFeedbackTimer=0;
@@ -160,6 +197,11 @@ const BeadI18n = (() => {
     copyFeedbackTimer=setTimeout(clearCopyFeedback,3500);
   }
   function status(key,error=false){state.statusKey=key;state.statusError=error;$('status').textContent=key?t(key):'';$('status').classList.toggle('error',error);}
+  function exportNotice(key,error=false){
+    $('gameExportNotice').hidden=false;$('gameExportNotice').classList.toggle('error',error);
+    $('gameExportMessage').dataset.i18n=key;$('gameExportMessage').textContent=t(key);
+  }
+  function clearGameExport(){if(state.gameExport?.url)URL.revokeObjectURL(state.gameExport.url);state.gameExport=null;state.isGameExport=false;$('gameExportNotice').hidden=true;$('gameExportDownload').hidden=true;$('gameExportDownload').href='#';$('gameExportDownload').removeAttribute('download');}
   function applyLanguage(next){
     language=next;document.documentElement.lang=next==='zh'?'zh-CN':'en';document.title=t('title');
     document.querySelector('meta[name="description"]').content=t('description');
@@ -168,6 +210,7 @@ const BeadI18n = (() => {
     $('languageZh').setAttribute('aria-pressed',String(next==='zh'));$('languageEn').setAttribute('aria-pressed',String(next==='en'));
     Array.from($('matte').options).forEach((option,i)=>option.textContent=C.symbols[i+1]+' · '+t('colorNames')[i]);
     if(state.isDemo){state.name=t('demoName');$('fileName').textContent=t('demoFile');}
+    if(state.isGameExport){state.name=state.gameExport.name||t('gameExportName');$('fileName').textContent=t('gameExportFile',{name:state.name});}
     preview.setAttribute('aria-label',t(state.view+'Aria'));
     if($('copyToast').classList.contains('is-visible'))$('copyToastText').textContent=t('copyNotice');
     status(state.statusKey,state.statusError);render();
@@ -225,7 +268,7 @@ const BeadI18n = (() => {
   function resetCrop(fit=false){state.x=state.y=0;state.zoom=fit?Math.min(state.oriented.width,state.oriented.height)/Math.max(state.oriented.width,state.oriented.height)*100:100;schedule();}
   function setZoom(value){const next=Math.min(400,Math.max(+$('zoom').min,value)),ratio=next/state.zoom;state.x*=ratio;state.y*=ratio;state.zoom=next;schedule();}
   async function loadFile(file){
-    if(!file)return;const ticket=++state.ticket;status('loading');
+    if(!file)return;const ticket=++state.ticket;clearGameExport();status('loading');
     const url=URL.createObjectURL(file);
     try{
       const img=new Image();img.src=url;await img.decode();if(ticket!==state.ticket)return;
@@ -238,7 +281,7 @@ const BeadI18n = (() => {
     finally{URL.revokeObjectURL(url);$('fileInput').value='';}
   }
   function demo(){
-    ++state.ticket;
+    ++state.ticket;clearGameExport();
     const pattern='000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000D00000000000000000000D0000000000DDD00000000000000000DD0000000000D11D00000000000000DD1D0000000000D141D000000000000D141D0000000000D1441DD000000000D1441D0000000000D144441DDDDDDDDD14441D0000000000D1444DD1EE11EE1DD4441D0000000000D14DD111EE11EE111DD41D0000000000D1D11111EE11EE11111D1D0000000000DD111111111111111111DD0000000000D11111111111111111111D0000000000D11111221111111221111D000000000D1111112211111112211111D00000000D1111112211111112211111D00000000DDD144411111111111444DDD00000000D11DDD1111123211111DD11D000000000D11111111112111111111D0000000000DDDDD1111111111111DDDDD0000000000D111111111111111111D0000000000000D1111111111111111D000000000000000DD111111111111DD000000000000000000DD11111111DD0000000000000000000000DDDDDDDD00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000';
     const s=document.createElement('canvas');s.width=s.height=32;const g=s.getContext('2d');
     for(let i=0;i<1024;i++){const v=C.symbols.indexOf(pattern[i]);if(v>0){g.fillStyle='#'+C.hex[v-1];g.fillRect(i%32,Math.floor(i/32),1,1);}}
@@ -273,7 +316,40 @@ const BeadI18n = (() => {
     try{if(!navigator.clipboard?.writeText)throw new Error('fallback');await navigator.clipboard.writeText(text);confirmCopy();}
     catch(e){const box=$('code');box.focus();box.select();box.setSelectionRange(0,box.value.length);let copied=false;try{copied=document.execCommand('copy');}catch(_){}if(copied)confirmCopy();else status('copyFallback');}
   };
-  function saveBlob(blob,suffix){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=state.name.replace(/[<>:"/\\|?*\x00-\x1f]/g,'_').slice(0,80)+suffix;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);}
+  function downloadName(name,suffix){return (name.replace(/[<>:"/\\|?*\x00-\x1f]/g,'_').slice(0,80)||t('defaultName'))+suffix;}
+  function saveBlob(blob,suffix,name=state.name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=downloadName(name,suffix);document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);}
+  function downloadGameArtwork(){
+    const artwork=state.gameExport;if(!artwork || artwork.pending)return;
+    const name=artwork.name||t('gameExportName'),suffix='_'+artwork.style+'_1024.png';
+    if(artwork.blob){saveBlob(artwork.blob,suffix,name);exportNotice('gameExportReady');return;}
+    artwork.pending=true;$('gameExportDownload').setAttribute('aria-disabled','true');exportNotice('gameExportPreparing');
+    try{
+      const canvas=document.createElement('canvas');canvas.width=canvas.height=1024;
+      BeadExport.drawArtwork(canvas.getContext('2d'),artwork.cells,artwork.style,1024);
+      canvas.toBlob(blob=>{
+        if(state.gameExport!==artwork)return;
+        artwork.pending=false;$('gameExportDownload').removeAttribute('aria-disabled');
+        if(!blob){exportNotice('gameExportError',true);return;}
+        artwork.blob=blob;artwork.url=URL.createObjectURL(blob);$('gameExportDownload').href=artwork.url;$('gameExportDownload').download=downloadName(name,suffix);saveBlob(blob,suffix,name);exportNotice('gameExportReady');
+      },'image/png');
+    }catch(_){artwork.pending=false;$('gameExportDownload').removeAttribute('aria-disabled');exportNotice('gameExportError',true);}
+  }
+  function loadGameExport(){
+    let artwork;
+    try{artwork=BeadExport.parseUrl(location.href);}
+    catch(_){demo();exportNotice('gameExportInvalid',true);return true;}
+    if(!artwork)return false;
+    ++state.ticket;clearGameExport();state.gameExport=artwork;state.isGameExport=true;state.isDemo=false;
+    const source=document.createElement('canvas');source.width=source.height=32;
+    BeadExport.drawArtwork(source.getContext('2d'),artwork.cells,'solid',32);
+    state.source=source;state.angle=0;state.mirror=false;state.name=artwork.name||t('gameExportName');
+    $('fileName').textContent=t('gameExportFile',{name:state.name});$('mirrorButton').setAttribute('aria-pressed','false');
+    $('samplingNearest').checked=true;$('background').value='empty';$('alpha').value='128';
+    orient();resetCrop();view(artwork.style);flush();status('');
+    $('gameExportDownload').hidden=false;downloadGameArtwork();return true;
+  }
+  $('gameExportDownload').onclick=e=>{if(!state.gameExport?.blob){e.preventDefault();downloadGameArtwork();}};
+  window.addEventListener('hashchange',()=>{if(!loadGameExport())demo();});
   function png(canvas,suffix){canvas.toBlob(blob=>{if(blob){saveBlob(blob,suffix);status('pngReady');}else status('pngError',true);},'image/png');}
   $('downloadCode').onclick=()=>{flush();saveBlob(new Blob([$('code').value],{type:'text/plain;charset=utf-8'}),'_template.txt');status('txtReady');};
   $('downloadPixels').onclick=()=>{
@@ -289,7 +365,7 @@ const BeadI18n = (() => {
     for(let i=0;i<16;i++){const x=64+i%8*166,y=1462+Math.floor(i/8)*93;g.fillStyle='#'+C.hex[i];g.fillRect(x,y,42,42);g.strokeStyle='#bcc6ba';g.lineWidth=1;g.strokeRect(x,y,42,42);g.fillStyle=textColor(i);g.font='bold 22px ui-monospace,monospace';g.fillText(C.symbols[i+1],x+21,y+23);g.textAlign='left';g.fillStyle='#203a35';g.font='20px "Microsoft YaHei",sans-serif';g.fillText(t('colorNames')[i],x+51,y+13);g.font='18px ui-monospace,monospace';g.fillText(t('beadQuantity',{count:state.counts[i+1]}),x+51,y+39);g.textAlign='center';}
     g.textAlign='left';g.fillStyle='#61706b';g.font='18px "Microsoft YaHei",sans-serif';g.fillText(t('chartFooter'),64,1690);png(c,t('chartSuffix'));
   };
-  applyLanguage(language);demo();
+  applyLanguage(language);if(!loadGameExport())demo();
 })();
 </script>
 </body>

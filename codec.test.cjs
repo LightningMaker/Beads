@@ -13,14 +13,15 @@ const html = readFileSync(resolve(__dirname, 'index.html'), 'utf8');
 const templatesSource = readFileSync(resolve(root, 'Assets/PixelBeads/Scripts/PBTemplates.cs'), 'utf8');
 const builderSource = readFileSync(resolve(root, 'Assets/PixelBeads/Editor/PBWorldBuilder.cs'), 'utf8');
 
-function inlineModule(id, name) {
+function inlineModule(id, name, context = {}) {
   const script = html.match(new RegExp(`<script id="${id}">([\\s\\S]*?)<\\/script>`));
   assert.ok(script, `standalone page must expose the tested ${id} script`);
-  return runInNewContext(`${script[1]}\n${name};`, {}, { filename: `index.html#${id}`, timeout: 5000 });
+  return runInNewContext(`${script[1]}\n${name};`, context, { filename: `index.html#${id}`, timeout: 5000 });
 }
 
 const core = inlineModule('bead-core', 'BeadCore');
 const i18n = inlineModule('bead-i18n', 'BeadI18n');
+const exporter = inlineModule('bead-export', 'BeadExport', { URL, URLSearchParams, BeadCore: core });
 const symbols = '0123456789ABCDEFG';
 const patternsBlock = templatesSource.match(/public string\[\] patterns\s*=\s*new string\[\]\s*\{([\s\S]*?)\};/);
 assert.ok(patternsBlock, 'locate actual scene patterns rather than copied fixtures');
@@ -61,8 +62,106 @@ test('all 48 scene templates encode unchanged in top-down order', () => {
     const cells = Uint8Array.from(pattern, symbol => symbols.indexOf(symbol));
     const original = cells.slice();
     assert.equal(core.template(cells), pattern, `template ${index} text output`);
+    sameBytes(core.decodeTemplate(pattern), cells, `template ${index} decoding`);
     sameBytes(cells, original, 'encoding must not mutate input');
   });
+});
+
+function exportUrl(params, base = 'https://example.org/BeadPattern/') {
+  const url = new URL(base);
+  url.hash = new URLSearchParams(params).toString();
+  return url.href;
+}
+
+test('game export URLs restore every scene template on root and Pages project paths', () => {
+  for (const base of ['http://127.0.0.1:8765/', 'https://example.org/BeadPattern/']) {
+    patterns.forEach((pattern, index) => {
+      const result = exporter.parseUrl(exportUrl({ export: '1', pattern, style: 'holes', name: `作品 ${index} & + # / ?` }, base));
+      assert.equal(core.template(result.cells), pattern);
+      assert.equal(result.style, 'holes');
+      assert.equal(result.name, `作品 ${index} & + # / ?`);
+    });
+  }
+});
+
+test('export defaults and all-empty artworks are supported without changing orientation', () => {
+  const cells = new Uint8Array(1024);
+  cells[0] = 1; cells[31] = 2; cells[992] = 3; cells[1023] = 16;
+  const result = exporter.parseUrl(exportUrl({ export: '1', pattern: core.template(cells) }));
+  sameBytes(result.cells, cells);
+  assert.equal(result.style, 'solid');
+  assert.equal(result.name, '');
+  const empty = exporter.parseUrl(exportUrl({ export: '1', pattern: '0'.repeat(1024), name: '   ' }));
+  sameBytes(empty.cells, new Uint8Array(1024));
+  assert.equal(empty.name, '');
+});
+
+test('normal visits, unrelated fragments and query strings never trigger exports', () => {
+  for (const url of ['https://example.org/', 'https://example.org/#crop', 'https://example.org/#lang=zh',
+    `https://example.org/?export=1&pattern=${patterns[0]}`]) {
+    assert.equal(exporter.parseUrl(url), null);
+  }
+});
+
+test('export rejects invalid templates, versions, styles, duplicate fields and oversized input', () => {
+  const valid = { export: '1', pattern: patterns[0] };
+  const cases = [
+    { pattern: patterns[0] }, { export: '1' }, { ...valid, export: '2' },
+    { ...valid, pattern: patterns[0].slice(1) }, { ...valid, pattern: patterns[0] + '0' },
+    { ...valid, pattern: patterns[0] + '\n' }, { ...valid, pattern: 'g'.repeat(1024) },
+    { ...valid, pattern: 'H'.repeat(1024) }, { ...valid, pattern: ' '.repeat(1024) },
+    { ...valid, pattern: `${'0'.repeat(1023)}<` }, { ...valid, style: 'chart' },
+    { ...valid, style: '' }, { ...valid, name: 'x'.repeat(129) },
+    { ...valid, extra: 'x'.repeat(8192) }
+  ];
+  for (const params of cases) assert.throws(() => exporter.parseUrl(exportUrl(params)));
+  for (const key of ['export', 'pattern', 'style', 'name']) {
+    const params = new URLSearchParams({ ...valid, style: 'solid', name: 'test' });
+    params.append(key, params.get(key));
+    assert.throws(() => exporter.parseUrl(`https://example.org/#${params}`));
+  }
+  for (const pattern of [null, undefined, [], patterns[0] + '\n']) assert.throws(() => core.decodeTemplate(pattern));
+});
+
+function drawingContext() {
+  const calls = [];
+  const g = { calls, fillStyle: '',
+    clearRect: (...args) => calls.push(['clear', ...args]),
+    fillRect: (...args) => calls.push(['square', g.fillStyle, ...args]),
+    beginPath: () => calls.push(['path']),
+    arc: (...args) => calls.push(['arc', ...args]),
+    fill: rule => calls.push(['fill', g.fillStyle, rule])
+  };
+  return g;
+}
+
+test('solid artwork keeps exact corner colors and leaves empty cells transparent', () => {
+  const cells = new Uint8Array(1024);
+  cells[0] = 1; cells[31] = 2; cells[992] = 3; cells[1023] = 16;
+  const g = drawingContext();
+  exporter.drawArtwork(g, cells);
+  assert.deepEqual(g.calls, [
+    ['clear', 0, 0, 1024, 1024],
+    ['square', '#FFF2D6', 0, 0, 32, 32],
+    ['square', '#3A3540', 992, 0, 32, 32],
+    ['square', '#F2797A', 0, 992, 32, 32],
+    ['square', '#C95468', 992, 992, 32, 32]
+  ]);
+  const empty = drawingContext();
+  exporter.drawArtwork(empty, new Uint8Array(1024));
+  assert.deepEqual(empty.calls, [['clear', 0, 0, 1024, 1024]]);
+});
+
+test('hole artwork uses transparent rings with the original palette and validates output options', () => {
+  const g = drawingContext(), cells = new Uint8Array(1024);
+  cells[33] = 16;
+  exporter.drawArtwork(g, cells, 'holes');
+  assert.deepEqual(g.calls.map(call => call[0]), ['clear', 'path', 'arc', 'arc', 'fill']);
+  assert.deepEqual(g.calls[2].slice(1, 4), [48, 48, 32 * .455]);
+  assert.deepEqual(g.calls[3].slice(1, 4), [48, 48, 32 * .145]);
+  assert.deepEqual(g.calls[4], ['fill', '#C95468', 'evenodd']);
+  for (const style of ['chart', '', null]) assert.throws(() => exporter.drawArtwork(g, cells, style));
+  for (const size of [0, 31, 4097, NaN, 32.5]) assert.throws(() => exporter.drawArtwork(g, cells, 'solid', size));
 });
 
 test('built-in cat demo is exactly the first scene template', () => {
